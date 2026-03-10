@@ -1,0 +1,43 @@
+<idea-plugin>
+    <id>ai.opencode.plugin</id>
+    <name>OpenCode</name>
+    <vendor email="support@opencode.ai" url="https://opencode.ai">OpenCode</vendor>
+
+    <description><![CDATA[
+    A GUI plugin for OpenCode AI coding agent, providing a graphical interface for:
+    <ul>
+        <li>Chat with AI assistant</li>
+        <li>File and image upload</li>
+        <li>Session management</li>
+        <li>MCP server management</li>
+        <li>Skills and Agent selection</li>
+    </ul>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Main Tool Window -->
+        <toolWindow id="OpenCode"
+                    factoryClass="ai.opencode.plugin.ui.OpenCodeToolWindowFactory"
+                    anchor="right"
+                    icon="/META-INF/pluginIcon.svg"/>
+        
+        <!-- Settings -->
+        <applicationConfigurable parentId="tools"
+                                 instance="ai.opencode.plugin.settings.OpenCodeSettingsConfigurable"
+                                 id="ai.opencode.plugin.settings.OpenCodeSettingsConfigurable"
+                                 displayName="OpenCode"/>
+        
+        <!-- Services -->
+        <applicationService serviceImplementation="ai.opencode.plugin.settings.OpenCodeSettings"/>
+        <applicationService serviceImplementation="ai.opencode.plugin.service.OpenCodeService"/>
+        
+        <!-- Startup Activity -->
+        <postStartupActivity implementation="ai.opencode.plugin.startup.OpenCodeStartupActivity"/>
+    </extensions>
+
+    <actions>
+        <!-- Actions will be added here -->
+    </actions>
+</idea-plugin>
