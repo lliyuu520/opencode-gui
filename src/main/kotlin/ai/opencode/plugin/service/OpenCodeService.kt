@@ -9,6 +9,7 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 
 /**
  * Service for managing OpenCode CLI process and communication
@@ -57,6 +58,22 @@ class OpenCodeService {
             }
     }
 
+    private fun startProcess(
+        arguments: List<String>,
+        workingDirectory: File? = null,
+        config: OpenCodeCliConfig = currentCliConfig()
+    ): Process {
+        val process = createProcessBuilder(
+            arguments = arguments,
+            workingDirectory = workingDirectory,
+            config = config
+        ).start()
+
+        // OpenCode CLI may wait for stdin EOF in non-interactive mode.
+        process.outputStream.close()
+        return process
+    }
+
     private fun applyProviderEnvironment(
         environment: MutableMap<String, String>,
         config: OpenCodeCliConfig
@@ -83,7 +100,7 @@ class OpenCodeService {
      */
     fun isCLIAvailable(config: OpenCodeCliConfig = currentCliConfig()): Boolean {
         return try {
-            val process = createProcessBuilder(listOf("--version"), config = config).start()
+            val process = startProcess(listOf("--version"), config = config)
             process.waitFor() == 0
         } catch (e: Exception) {
             logger.warn("OpenCode CLI not found at '${resolveExecutable(config)}': ${e.message}")
@@ -96,7 +113,7 @@ class OpenCodeService {
      */
     fun getVersion(config: OpenCodeCliConfig = currentCliConfig()): String? {
         return try {
-            val process = createProcessBuilder(listOf("--version"), config = config).start()
+            val process = startProcess(listOf("--version"), config = config)
             val output = process.inputStream.bufferedReader().readText().trim()
             process.waitFor()
             output.lines().firstOrNull()?.trim()
@@ -188,7 +205,9 @@ class OpenCodeService {
                 workingDirectory = File(System.getProperty("user.home"))
             )
 
-            val process = processBuilder.start()
+            val process = processBuilder.start().also {
+                it.outputStream.close()
+            }
             serverProcess = process
             val startupOutput = StringBuffer()
             
@@ -272,34 +291,101 @@ class OpenCodeService {
     suspend fun runWithMessage(
         projectPath: String,
         message: String,
+        attachments: List<File> = emptyList(),
         model: String? = null,
         agent: String? = null
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val command = mutableListOf("run", message)
-            
+            val command = mutableListOf("run", "--format", "json")
+
+            if (message.isNotBlank()) {
+                command.add(message)
+            }
+
             model?.let {
                 command.add("-m")
                 command.add(it)
             }
-            
+
             agent?.let {
                 command.add("--agent")
                 command.add(it)
             }
 
-            val process = createProcessBuilder(
+            attachments.forEach { file ->
+                command.add("-f")
+                command.add(file.absolutePath)
+            }
+
+            val missingAttachments = attachments.filterNot(File::exists)
+            if (missingAttachments.isNotEmpty()) {
+                return@withContext Result.failure(
+                    IllegalArgumentException(
+                        "Attachment not found: ${missingAttachments.joinToString(", ") { it.name }}"
+                    )
+                )
+            }
+
+            logger.info(
+                "Running OpenCode with agent='${agent ?: ""}', model='${model ?: ""}', attachments=${attachments.size}"
+            )
+
+            val process = startProcess(
                 arguments = command,
                 workingDirectory = File(projectPath)
-            ).start()
-            
-            val output = process.inputStream.bufferedReader().readText()
-            val exitCode = process.waitFor()
-            
+            )
+
+            val outputLines = mutableListOf<String>()
+            val readerThread = Thread {
+                process.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        outputLines.add(line)
+                        logger.info("OpenCode run: $line")
+                    }
+                }
+            }.apply {
+                isDaemon = true
+                start()
+            }
+
+            val finished = process.waitFor(90, TimeUnit.SECONDS)
+            if (!finished) {
+                process.destroyForcibly()
+                readerThread.join(2000)
+                val partialOutput = summarizeProcessOutput(outputLines)
+                return@withContext Result.failure(
+                    IllegalStateException(
+                        buildString {
+                            append("OpenCode run timed out after 90 seconds.")
+                            if (partialOutput.isNotBlank()) {
+                                append(" Partial output: ")
+                                append(partialOutput)
+                            }
+                        }
+                    )
+                )
+            }
+
+            readerThread.join(2000)
+            val exitCode = process.exitValue()
+            val parsedOutput = parseRunOutput(outputLines)
+
             if (exitCode == 0) {
-                Result.success(output)
+                Result.success(
+                    parsedOutput.response.ifBlank {
+                        parsedOutput.diagnostics.ifBlank {
+                            "OpenCode finished without returning visible output."
+                        }
+                    }
+                )
             } else {
-                Result.failure(Exception("OpenCode exited with code $exitCode: $output"))
+                Result.failure(
+                    Exception(
+                        "OpenCode exited with code $exitCode: ${
+                            parsedOutput.diagnostics.ifBlank { "No diagnostic output." }
+                        }"
+                    )
+                )
             }
         } catch (e: Exception) {
             logger.error("Failed to run OpenCode", e)
@@ -312,7 +398,7 @@ class OpenCodeService {
      */
     suspend fun listMCPServers(): Result<List<MCPServerInfo>> = withContext(Dispatchers.IO) {
         try {
-            val process = createProcessBuilder(listOf("mcp", "list")).start()
+            val process = startProcess(listOf("mcp", "list"))
             
             val output = process.inputStream.bufferedReader().readText()
             process.waitFor()
@@ -339,7 +425,10 @@ class OpenCodeService {
     /**
      * List available models
      */
-    suspend fun listModels(provider: String? = null): Result<List<ModelInfo>> = withContext(Dispatchers.IO) {
+    suspend fun listModels(
+        provider: String? = null,
+        config: OpenCodeCliConfig = currentCliConfig()
+    ): Result<List<ModelInfo>> = withContext(Dispatchers.IO) {
         try {
             val command = if (provider != null) {
                 listOf("models", provider)
@@ -347,7 +436,7 @@ class OpenCodeService {
                 listOf("models")
             }
             
-            val process = createProcessBuilder(command).start()
+            val process = startProcess(command, config = config)
             
             val output = process.inputStream.bufferedReader().readText()
             process.waitFor()
@@ -367,7 +456,11 @@ class OpenCodeService {
                 }
             }
             
-            Result.success(models)
+            Result.success(
+                models
+                    .distinctBy(ModelInfo::id)
+                    .sortedBy(ModelInfo::id)
+            )
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -378,7 +471,7 @@ class OpenCodeService {
      */
     suspend fun listSessions(): Result<List<SessionInfo>> = withContext(Dispatchers.IO) {
         try {
-            val process = createProcessBuilder(listOf("session", "list")).start()
+            val process = startProcess(listOf("session", "list"))
             
             val output = process.inputStream.bufferedReader().readText()
             process.waitFor()
@@ -407,7 +500,7 @@ class OpenCodeService {
      */
     suspend fun exportSession(sessionId: String): Result<String> = withContext(Dispatchers.IO) {
         try {
-            val process = createProcessBuilder(listOf("export", sessionId)).start()
+            val process = startProcess(listOf("export", sessionId))
             
             val output = process.inputStream.bufferedReader().readText()
             process.waitFor()
@@ -441,7 +534,7 @@ class OpenCodeService {
 
     fun listAgents(config: OpenCodeCliConfig = currentCliConfig()): List<String> {
         return try {
-            val process = createProcessBuilder(listOf("agent", "list"), config = config).start()
+            val process = startProcess(listOf("agent", "list"), config = config)
             val output = process.inputStream.bufferedReader().readText()
             val exitCode = process.waitFor()
             if (exitCode != 0) {
@@ -465,6 +558,124 @@ class OpenCodeService {
             logger.warn("Failed to list agents", e)
             listOf("build", "plan")
         }
+    }
+
+    private fun parseRunOutput(lines: List<String>): OpenCodeRunOutput {
+        val responseParts = mutableListOf<String>()
+        val diagnostics = mutableListOf<String>()
+
+        lines.forEach { rawLine ->
+            val line = stripAnsi(rawLine).trim()
+            if (line.isBlank()) return@forEach
+
+            if (!line.startsWith("{")) {
+                if (!isBenignRuntimeMessage(line)) {
+                    diagnostics.add(line)
+                }
+                return@forEach
+            }
+
+            extractTextPayload(line)?.let(responseParts::add)
+
+            if (extractJsonStringField(line, "type") == "error") {
+                extractErrorMessage(line)?.let(diagnostics::add)
+            }
+        }
+
+        return OpenCodeRunOutput(
+            response = responseParts.joinToString("\n\n").trim(),
+            diagnostics = diagnostics.joinToString(" | ").trim()
+        )
+    }
+
+    private fun summarizeProcessOutput(lines: List<String>): String {
+        val normalizedLines = lines.asSequence()
+            .map(::stripAnsi)
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .filterNot(::isBenignRuntimeMessage)
+            .toList()
+
+        return normalizedLines
+            .takeLast(minOf(5, normalizedLines.size))
+            .joinToString(" | ")
+    }
+
+    private fun extractTextPayload(jsonLine: String): String? {
+        val textEventPattern = Regex(
+            """"type"\s*:\s*"text".*?"text"\s*:\s*"((?:\\.|[^"\\])*)""""
+        )
+        return textEventPattern.find(jsonLine)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let(::decodeJsonString)
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+    }
+
+    private fun extractErrorMessage(jsonLine: String): String? {
+        return extractJsonStringField(jsonLine, "message")
+            ?.let(::decodeJsonString)
+            ?.takeIf(String::isNotBlank)
+            ?: extractJsonStringField(jsonLine, "text")
+                ?.let(::decodeJsonString)
+                ?.takeIf(String::isNotBlank)
+    }
+
+    private fun extractJsonStringField(jsonLine: String, field: String): String? {
+        val pattern = Regex(""""$field"\\s*:\\s*"((?:\\\\.|[^"\\\\])*)"""")
+        return pattern.find(jsonLine)?.groupValues?.get(1)
+    }
+
+    private fun decodeJsonString(value: String): String {
+        val result = StringBuilder(value.length)
+        var index = 0
+        while (index < value.length) {
+            val current = value[index]
+            if (current != '\\' || index == value.lastIndex) {
+                result.append(current)
+                index++
+                continue
+            }
+
+            when (val escaped = value[index + 1]) {
+                '\\' -> result.append('\\')
+                '"' -> result.append('"')
+                '/' -> result.append('/')
+                'b' -> result.append('\b')
+                'f' -> result.append('\u000C')
+                'n' -> result.append('\n')
+                'r' -> result.append('\r')
+                't' -> result.append('\t')
+                'u' -> {
+                    if (index + 5 < value.length) {
+                        val hex = value.substring(index + 2, index + 6)
+                        hex.toIntOrNull(16)?.let { result.append(it.toChar()) }
+                        index += 4
+                    } else {
+                        result.append("\\u")
+                    }
+                }
+
+                else -> result.append(escaped)
+            }
+            index += 2
+        }
+        return result.toString()
+    }
+
+    private fun stripAnsi(value: String): String {
+        return value.replace(Regex("\\u001B\\[[;\\d]*m"), "")
+    }
+
+    private fun isBenignRuntimeMessage(line: String): Boolean {
+        return line.startsWith("agent \"") ||
+            line.startsWith("! agent \"") ||
+            line.startsWith("[config-context]") ||
+            line.startsWith("bun install ") ||
+            line.startsWith("Checked ") ||
+            line.startsWith("Bun ") ||
+            line.startsWith("Resolving dependencies")
     }
 }
 
@@ -492,6 +703,11 @@ data class OpenCodeCliDiagnostic(
     val configFile: String?,
     val ohMyOpencodeConfigFile: String?,
     val ohMyOpencodeEnabled: Boolean
+)
+
+data class OpenCodeRunOutput(
+    val response: String,
+    val diagnostics: String
 )
 
 /**

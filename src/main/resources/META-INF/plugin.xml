@@ -23,12 +23,6 @@
                     anchor="right"
                     icon="/META-INF/pluginIcon.svg"/>
         
-        <!-- Settings -->
-        <applicationConfigurable parentId="tools"
-                                 instance="ai.opencode.plugin.settings.OpenCodeSettingsConfigurable"
-                                 id="ai.opencode.plugin.settings.OpenCodeSettingsConfigurable"
-                                 displayName="OpenCode"/>
-        
         <!-- Services -->
         <applicationService serviceImplementation="ai.opencode.plugin.settings.OpenCodeSettings"/>
         <applicationService serviceImplementation="ai.opencode.plugin.service.OpenCodeService"/>

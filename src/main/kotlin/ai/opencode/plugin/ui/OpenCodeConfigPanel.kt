@@ -10,6 +10,7 @@ import com.intellij.openapi.ui.Messages
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.FormBuilder
 import com.intellij.util.ui.JBUI
+import kotlinx.coroutines.runBlocking
 import java.awt.BorderLayout
 import java.awt.Dimension
 import javax.swing.Box
@@ -43,7 +44,7 @@ class OpenCodeConfigPanel(
         toolTipText = "Optional. Supports opencode.json and opencode.jsonc."
     }
 
-    private val defaultModelField = JBTextField().apply {
+    private val defaultModelCombo = ComboBox(arrayOf(settings.defaultModel.ifBlank { "" })).apply {
         preferredSize = Dimension(320, preferredSize.height)
     }
 
@@ -60,6 +61,7 @@ class OpenCodeConfigPanel(
     private val saveButton = JButton("Save")
     private val resetButton = JButton("Reset")
     private val testButton = JButton("Test")
+    private val refreshModelsButton = JButton("Refresh Models")
     private val refreshAgentsButton = JButton("Refresh Agents")
 
     private val statusLabel = JLabel("Ready")
@@ -70,6 +72,7 @@ class OpenCodeConfigPanel(
 
         bindActions()
         loadFromSettings()
+        refreshModels()
         refreshAgents()
     }
 
@@ -81,6 +84,8 @@ class OpenCodeConfigPanel(
             add(resetButton)
             add(Box.createHorizontalStrut(8))
             add(testButton)
+            add(Box.createHorizontalStrut(8))
+            add(refreshModelsButton)
             add(Box.createHorizontalStrut(8))
             add(refreshAgentsButton)
             add(Box.createHorizontalStrut(12))
@@ -94,7 +99,7 @@ class OpenCodeConfigPanel(
             .addLabeledComponent("OpenCode Path:", opencodePathField)
             .addLabeledComponent("Config Directory:", configDirField)
             .addLabeledComponent("Config File:", configFileField)
-            .addLabeledComponent("Default Model:", defaultModelField)
+            .addLabeledComponent("Default Model:", defaultModelCombo)
             .addLabeledComponent("Default Agent:", defaultAgentCombo)
             .addLabeledComponent("Server Port (0=auto):", serverPortField)
             .addComponent(autoStartCheckbox)
@@ -107,6 +112,7 @@ class OpenCodeConfigPanel(
         saveButton.addActionListener { saveToSettings() }
         resetButton.addActionListener { loadFromSettings() }
         testButton.addActionListener { testConfiguration() }
+        refreshModelsButton.addActionListener { refreshModels() }
         refreshAgentsButton.addActionListener { refreshAgents() }
     }
 
@@ -125,7 +131,7 @@ class OpenCodeConfigPanel(
         opencodePathField.text = settings.opencodePath
         configDirField.text = settings.opencodeConfigDir
         configFileField.text = settings.opencodeConfigFile
-        defaultModelField.text = settings.defaultModel
+        selectModel(settings.defaultModel)
         serverPortField.text = settings.serverPort.toString()
         autoStartCheckbox.isSelected = settings.autoStartServer
         selectAgent(settings.defaultAgent)
@@ -137,7 +143,7 @@ class OpenCodeConfigPanel(
         settings.opencodePath = opencodePathField.text.trim()
         settings.opencodeConfigDir = configDirField.text.trim()
         settings.opencodeConfigFile = configFileField.text.trim()
-        settings.defaultModel = defaultModelField.text.trim()
+        settings.defaultModel = (defaultModelCombo.selectedItem as? String).orEmpty().trim()
         settings.defaultAgent = (defaultAgentCombo.selectedItem as? String).orEmpty()
         settings.serverPort = serverPortField.text.trim().toIntOrNull() ?: 0
         settings.autoStartServer = autoStartCheckbox.isSelected
@@ -205,6 +211,32 @@ class OpenCodeConfigPanel(
         }
     }
 
+    private fun refreshModels() {
+        refreshModelsButton.isEnabled = false
+        statusLabel.text = "Refreshing models..."
+        val desiredModel = (defaultModelCombo.selectedItem as? String)?.takeIf { it.isNotBlank() }
+            ?: settings.defaultModel
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val result = runBlocking { service.listModels(config = currentConfig()) }
+            ApplicationManager.getApplication().invokeLater {
+                refreshModelsButton.isEnabled = true
+                result.fold(
+                    onSuccess = { models ->
+                        defaultModelCombo.removeAllItems()
+                        models.forEach { defaultModelCombo.addItem(it.id) }
+                        selectModel(desiredModel)
+                        statusLabel.text = "Loaded ${models.size} model(s)"
+                    },
+                    onFailure = {
+                        selectModel(desiredModel)
+                        statusLabel.text = "Failed to load models"
+                    }
+                )
+            }
+        }
+    }
+
     private fun selectAgent(agent: String?) {
         val value = agent?.trim().orEmpty()
         if (value.isBlank()) {
@@ -222,5 +254,24 @@ class OpenCodeConfigPanel(
             defaultAgentCombo.addItem(value)
         }
         defaultAgentCombo.selectedItem = value
+    }
+
+    private fun selectModel(model: String?) {
+        val value = model?.trim().orEmpty()
+        if (value.isBlank()) {
+            if (defaultModelCombo.itemCount > 0) {
+                defaultModelCombo.selectedIndex = 0
+            }
+            return
+        }
+
+        val existing = (0 until defaultModelCombo.itemCount)
+            .map { defaultModelCombo.getItemAt(it) }
+            .any { it == value }
+
+        if (!existing) {
+            defaultModelCombo.addItem(value)
+        }
+        defaultModelCombo.selectedItem = value
     }
 }

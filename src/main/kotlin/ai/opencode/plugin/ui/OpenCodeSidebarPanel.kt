@@ -50,6 +50,10 @@ class OpenCodeSidebarPanel(private val project: Project) : JPanel(BorderLayout()
     private fun notifyStateChanged() {
         onStateChanged?.invoke()
     }
+
+    fun openConfigTab() {
+        tabbedPane.selectedComponent = configPanel
+    }
 }
 
 /**

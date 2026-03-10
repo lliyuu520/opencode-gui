@@ -5,6 +5,7 @@ import ai.opencode.plugin.service.OpenCodeService
 import ai.opencode.plugin.settings.OpenCodeSettings
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
+import com.intellij.icons.AllIcons
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
@@ -14,7 +15,10 @@ import javax.swing.JButton
 import javax.swing.JLabel
 import javax.swing.JPanel
 
-class OpenCodeStatusPanel(private val project: Project) : JPanel(BorderLayout()) {
+class OpenCodeStatusPanel(
+    private val project: Project,
+    private val onOpenSettings: () -> Unit = {}
+) : JPanel(BorderLayout()) {
 
     private val service = ApplicationManager.getApplication().getService(OpenCodeService::class.java)
     private val settings = OpenCodeSettings.INSTANCE
@@ -24,6 +28,11 @@ class OpenCodeStatusPanel(private val project: Project) : JPanel(BorderLayout())
     private val pluginLabel = JLabel("oh-my-opencode: unknown")
     private val modelLabel = JLabel("Model: -")
     private val serverLabel = JLabel("Server: idle")
+    private val settingsButton = JButton(AllIcons.General.GearPlain).apply {
+        toolTipText = "Open OpenCode settings"
+        isBorderPainted = false
+        isContentAreaFilled = false
+    }
     private val refreshButton = JButton("Refresh")
 
     init {
@@ -44,6 +53,8 @@ class OpenCodeStatusPanel(private val project: Project) : JPanel(BorderLayout())
 
         add(
             JPanel(FlowLayout(FlowLayout.RIGHT, 0, 3)).apply {
+                add(settingsButton)
+                add(Box.createHorizontalStrut(6))
                 add(refreshButton)
             },
             BorderLayout.EAST
@@ -54,6 +65,7 @@ class OpenCodeStatusPanel(private val project: Project) : JPanel(BorderLayout())
             JBUI.Borders.empty(4, 8)
         )
 
+        settingsButton.addActionListener { onOpenSettings() }
         refreshButton.addActionListener { refreshStatus() }
         refreshStatus()
     }

@@ -42,14 +42,7 @@ class OpenCodeChatPanel(private val project: Project) : JPanel(BorderLayout()) {
         if (text.isBlank() && attachments.isEmpty()) return
 
         messageHistory.addUserMessage(text, attachments.map { it.name })
-
-        if (attachments.isNotEmpty()) {
-            messageHistory.addAssistantMessage(
-                "Attachment forwarding is not wired yet. The current CLI integration sends only the text prompt."
-            )
-        }
-
-        inputPanel.setBusy(true, "Sending...")
+        inputPanel.setBusy(true, "Checking...")
 
         CoroutineScope(Dispatchers.IO).launch {
             val result = if (!service.isCLIAvailable()) {
@@ -60,11 +53,30 @@ class OpenCodeChatPanel(private val project: Project) : JPanel(BorderLayout()) {
                 )
             } else {
                 val settings = OpenCodeSettings.INSTANCE
+                val agent = settings.defaultAgent.ifBlank { null }
+                val model = settings.defaultModel.ifBlank { null }
+
+                SwingUtilities.invokeLater {
+                    inputPanel.setBusy(
+                        true,
+                        buildString {
+                            append("Sending")
+                            if (agent != null || model != null) {
+                                append(": ")
+                                append(agent ?: "-")
+                                append(" / ")
+                                append(model ?: "-")
+                            }
+                        }
+                    )
+                }
+
                 service.runWithMessage(
                     projectPath = project.basePath ?: project.projectFilePath?.let { File(it).parent } ?: ".",
                     message = text,
-                    model = settings.defaultModel.ifBlank { null },
-                    agent = settings.defaultAgent.ifBlank { null }
+                    attachments = attachments,
+                    model = model,
+                    agent = agent
                 )
             }
 
